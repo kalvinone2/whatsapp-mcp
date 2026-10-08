@@ -121,3 +121,24 @@ func TestUnreadMentionsAndMismatchedJID(t *testing.T) {
 		t.Fatal("foreign message stored")
 	}
 }
+
+func TestUnknownLiveIdentityClosesAllCachedContext(t *testing.T) {
+	s := testStore(t)
+	data := historyFixture(proto.Uint32(0), false)
+	if err := s.history(data); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.block("unknown-alias@lid"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.history(data); err != nil {
+		t.Fatal(err)
+	}
+	var eligible int
+	if err := s.db.QueryRow("SELECT count(*) FROM arc_chats WHERE eligible=1").Scan(&eligible); err != nil {
+		t.Fatal(err)
+	}
+	if eligible != 0 {
+		t.Fatal("unknown address left cached context available")
+	}
+}

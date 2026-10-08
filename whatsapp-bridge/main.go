@@ -4,6 +4,8 @@ package main
 import (
 	"context"
 	"database/sql"
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/signal"
@@ -20,6 +22,7 @@ import (
 	"go.mau.fi/whatsmeow/store/sqlstore"
 	"go.mau.fi/whatsmeow/types/events"
 	waLog "go.mau.fi/whatsmeow/util/log"
+	qrCode "rsc.io/qr"
 )
 
 const schema = `
@@ -38,7 +41,8 @@ type MessageStore struct {
 	mu sync.Mutex
 	// A new incoming message or unread action makes later history snapshots unsafe.
 	// Never let an old/chunked snapshot reopen a chat during the same connection.
-	blocked map[string]bool
+	blocked    map[string]bool
+	blockedAll bool
 }
 
 func NewMessageStore(path string) (*MessageStore, error) {
@@ -74,6 +78,17 @@ func (s *MessageStore) block(jid string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.blocked[jid] = true
+	var known int
+	if err := s.db.QueryRow("SELECT count(*) FROM arc_chats WHERE jid=?", jid).Scan(&known); err != nil {
+		return err
+	}
+	if known == 0 {
+		// A new address may alias a cached chat (LID/phone-number identities).
+		// Without proof of the mapping, close every chat and later history chunk.
+		s.blockedAll = true
+		_, err := s.db.Exec("UPDATE arc_chats SET eligible=0")
+		return err
+	}
 	_, err := s.db.Exec("UPDATE arc_chats SET eligible=0 WHERE jid=?", jid)
 	return err
 }
@@ -121,7 +136,7 @@ func (s *MessageStore) history(data *waHistorySync.HistorySync) error {
 		if name == "" {
 			name = jid
 		}
-		eligible := historyIsRead(c) && !s.blocked[jid]
+		eligible := historyIsRead(c) && !s.blocked[jid] && !s.blockedAll
 		if !historyIsRead(c) {
 			s.blocked[jid] = true
 		}
@@ -170,6 +185,18 @@ func (s *MessageStore) history(data *waHistorySync.HistorySync) error {
 	return tx.Commit()
 }
 
+// Managed output is consumed privately by the service, never written to logs.
+func reportState(state string, fields map[string]interface{}) {
+	if os.Getenv("ARC_MANAGED") != "true" {
+		return
+	}
+	if fields == nil {
+		fields = map[string]interface{}{}
+	}
+	fields["state"] = state
+	_ = json.NewEncoder(os.Stdout).Encode(fields)
+}
+
 func main() {
 	// Private stores, including session keys; never use an upstream messages database.
 	dir := "store"
@@ -188,12 +215,12 @@ func main() {
 	defer s.db.Close()
 	defer s.invalidate()
 	// A no-op logger prevents upstream debug/errors from exposing message bodies.
-	container, err := sqlstore.New("sqlite3", "file:store/whatsapp.db?_foreign_keys=on", waLog.Noop)
+	container, err := sqlstore.New(context.Background(), "sqlite3", "file:store/whatsapp.db?_foreign_keys=on", waLog.Noop)
 	if err != nil {
 		panic(err)
 	}
 	defer container.Close()
-	device, err := container.GetFirstDevice()
+	device, err := container.GetFirstDevice(context.Background())
 	if err != nil {
 		panic(err)
 	}
@@ -217,7 +244,13 @@ func main() {
 			if e.Action == nil || !e.Action.GetRead() {
 				eventErr = s.block(e.JID.String())
 			}
+		case *events.Connected:
+			reportState("connected", nil)
+		case *events.ConnectFailure, *events.ClientOutdated, *events.TemporaryBan:
+			reportState("error", nil)
+			eventErr = s.invalidate()
 		case *events.Disconnected, *events.LoggedOut:
+			reportState("disconnected", nil)
 			eventErr = s.invalidate()
 		}
 		if eventErr != nil {
@@ -234,17 +267,34 @@ func main() {
 		if err = client.Connect(); err != nil {
 			panic(err)
 		}
-		fmt.Println("Scan the QR with WhatsApp > Linked devices. No chats will be opened.")
+		if os.Getenv("ARC_MANAGED") != "true" {
+			fmt.Println("Scan the QR with WhatsApp > Linked devices. No chats will be opened.")
+		}
 		for event := range qr {
 			if event.Event == "code" {
-				qrterminal.GenerateHalfBlock(event.Code, qrterminal.L, os.Stdout)
+				if os.Getenv("ARC_MANAGED") == "true" {
+					code, encodeErr := qrCode.Encode(event.Code, qrCode.M)
+					if encodeErr != nil {
+						reportState("error", nil)
+						return
+					}
+					reportState("qr", map[string]interface{}{"qr_data_url": "data:image/png;base64," + base64.StdEncoding.EncodeToString(code.PNG()), "expires_at": time.Now().Add(event.Timeout).Unix()})
+				} else {
+					qrterminal.GenerateHalfBlock(event.Code, qrterminal.L, os.Stdout)
+				}
+			} else if event.Event != "success" {
+				reportState("error", nil)
+				client.Disconnect()
+				return
 			}
 		}
 	} else if err = client.Connect(); err != nil {
 		panic(err)
 	}
 	defer client.Disconnect()
-	fmt.Println("Receive-only connector active. Unknown or unread chats remain blocked.")
+	if os.Getenv("ARC_MANAGED") != "true" {
+		fmt.Println("Receive-only connector active. Unknown or unread chats remain blocked.")
+	}
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
 	defer signal.Stop(stop)

@@ -8,3 +8,4 @@ __pycache__/
 *.token
 whatsapp.log
 claude_desktop_config.json
+.local/

@@ -1,11 +1,12 @@
 """Only approved local context. No WhatsApp client or network calls."""
+import os
 import sqlite3
 import time
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
-MESSAGES_DB_PATH = Path(__file__).resolve().parent.parent / "whatsapp-bridge/store/context.db"
+MESSAGES_DB_PATH = Path(os.environ.get("ARC_CONTEXT_DB", str(Path(__file__).resolve().parent.parent / "whatsapp-bridge/store/context.db"))).resolve()
 
 
 def bounded(value, maximum=100):

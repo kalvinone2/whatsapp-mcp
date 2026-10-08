@@ -33,9 +33,25 @@ This first version is intentionally stricter than a general WhatsApp reader:
 - WhatsApp linking is unofficial. Read-only access does not establish zero account-ban risk.
 - Automated tests use synthetic messages. **Real-device unread-state and receipt behavior is not yet verified.** Validate with a noncritical test account before linking a primary number.
 
+## LifeDash integration
+
+`Dockerfile` runs a private managed service alongside LifeDash. It starts disabled with
+no agents permitted. LifeDash's Conexiones panel can initiate QR pairing, pause the
+connector and save per-agent read permissions. Pairing QR data is emitted privately
+by the Go process and expires automatically; it is never returned through agent MCP.
+No WhatsApp messages or read-state mutations are added by the management service.
+
+The managed service accepts authenticated `/control/status`, `/control/connect`,
+`/control/pause` and `/control/settings` owner requests. Context GETs additionally
+require an enabled, connected worker and a permitted `X-Arc-Agent`. LifeDash supplies
+this identity from its authenticated MCP agent, never from browser input.
+Expose no Docker ports; keep the service token server-only and its session volume
+private to this container. Pausing preserves session data. Never mount that volume
+into an agent container. See LifeDash's `docs/WHATSAPP.md` for configuration and limits.
+
 ## Run locally (macOS/Linux)
 
-Requires Go 1.24.1+, Python 3.11+, a C compiler for SQLite and a WhatsApp QR scan.
+Requires Go 1.26.8+, Python 3.11+, a C compiler for SQLite and a WhatsApp QR scan.
 From the repository root:
 
 ```sh
@@ -116,3 +132,7 @@ These checks are pending; do not infer their success from unit tests.
 
 Forked from upstream commit `7d6a06dcdce1f01dfb24f60e1030d5efba9f3b88`.
 Original MIT license retained in `LICENSE`. The WhatsApp library remains pinned to upstream's version.
+
+The managed image pins whatsmeow to `c386243a72ba` (2026-10-07). Failed/outdated QR events close access; an initial handshake that remains pending for 45 seconds is stopped and reported as an error. This dependency refresh still requires a real-device read-receipt check before relying on account behavior.
+
+An incoming address that cannot be matched to an existing chat closes all context for that connector run, including later history chunks. This deliberately covers unknown phone-number/LID aliases conservatively.
