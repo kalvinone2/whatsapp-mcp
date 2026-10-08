@@ -4,6 +4,7 @@ from pathlib import Path
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from unittest.mock import patch
 
@@ -65,7 +66,7 @@ class ServiceTests(unittest.TestCase):
         self.assertIsNone(self.controller.status()['qr_data_url'])
 
     def test_stalled_handshake_stops_and_closes_access(self):
-        self.controller.state='connecting';self.controller.started_at=0
+        self.controller.state='connecting';self.controller.started_at=time.monotonic()-46
         self.controller.config={'enabled':True,'allowed_agents':['hermes']}
         value=self.controller.status()
         self.assertEqual(value['state'],'error');self.assertIsNone(value['qr_data_url'])
